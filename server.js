@@ -1,17 +1,19 @@
 // server.js
-import 'dotenv/config';
-import { fileURLToPath } from 'url';
-import { dirname, join } from 'path';
-import express from 'express';
-import cors from 'cors';
-import http from 'http';
-import { Server } from 'socket.io';
-import connectDB from './config/db.js';
-import authRoutes from './routes/authRoutes.js';
-import adminRoutes from './routes/adminRoutes.js';
-import { socketAuth } from './middleware/authMiddleware.js';
-import Call from './models/call.js';
-import User from './models/User.js';
+import "dotenv/config";
+import { fileURLToPath } from "url";
+import { dirname, join } from "path";
+import express from "express";
+import cors from "cors";
+import connectDB from "./config/db.js";
+import authRoutes from "./routes/authRoutes.js";
+import adminRoutes from "./routes/adminRoutes.js";
+import authMiddleware from "./middleware/authMiddleware.js";
+import Call from "./models/Call.js";
+import User from "./models/User.js";
+
+// Agora token builder
+import pkg from "agora-access-token";
+const { RtcTokenBuilder, RtcRole } = pkg;
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
@@ -20,302 +22,247 @@ const app = express();
 connectDB();
 
 // middleware
-app.use(cors({ origin: 'http://localhost:3000' }));
+app.use(cors({ origin: "http://localhost:3000", credentials: true }));
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
-
-// serve uploaded files statically (dev)
-app.use('/uploads', express.static(join(__dirname, 'uploads')));
+app.use("/uploads", express.static(join(__dirname, "uploads")));
 
 // routes
-app.use('/api/auth', authRoutes);
-app.use('/api/admin', adminRoutes);
+app.use("/api/auth", authRoutes);
+app.use("/api/admin", adminRoutes);
 
-// basic root
-app.get('/', (req, res) => res.send('MERN verification backend running'));
-
-// error handler
-app.use((err, req, res, next) => {
-  console.error(err.stack);
-  res.status(500).json({ message: err.message });
-});
+app.get("/", (req, res) => res.send("MERN + Agora backend running"));
 
 // ----------------------------
-// SOCKET.IO + WEBRTC INTEGRATION
+// CONFIG: Agora
 // ----------------------------
-const httpServer = http.createServer(app);
-const io = new Server(httpServer, {
-  cors: {
-    origin: 'http://localhost:3000',
-    methods: ['GET', 'POST'],
-  },
-});
+const AGORA_APP_ID = process.env.AGORA_APP_ID;
+const AGORA_APP_CERTIFICATE = process.env.AGORA_APP_CERTIFICATE;
+const AGORA_TOKEN_EXPIRY = parseInt(process.env.AGORA_TOKEN_EXPIRY || "3600", 10);
 
-// attach socket auth middleware
-io.use(socketAuth);
+// ✅ Account-based token generation
+function generateAgoraTokenForAccount(
+  channelName,
+  account,
+  role = "publisher",
+  expireInSeconds = AGORA_TOKEN_EXPIRY
+) {
+  const now = Math.floor(Date.now() / 1000);
+  const privilegeExpireTs = now + expireInSeconds;
+  const rtcRole = role === "publisher" ? RtcRole.PUBLISHER : RtcRole.SUBSCRIBER;
 
-// matchmaking queues
+  const token = RtcTokenBuilder.buildTokenWithAccount(
+    AGORA_APP_ID,
+    AGORA_APP_CERTIFICATE,
+    channelName,
+    account, // Mongo _id string
+    rtcRole,
+    privilegeExpireTs
+  );
+  return token;
+}
+
+// ----------------------------
+// In-memory matchmaking queues
+// ----------------------------
 const maleQueue = new Map();
 const femaleQueue = new Map();
 const activeCalls = new Map();
+const pendingMatches = new Map(); // <- missing before
 
-io.on('connection', (socket) => {
-  const user = socket.user;
-  console.log(`✅ Socket connected: ${socket.id} (${user.email}) [${user.role}]`);
-
-  // user joins matchmaking queue
-  socket.on('join_queue', async (_, cb) => {
-    try {
-      if (user.role !== 'male' && user.role !== 'female') {
-        return cb?.({ ok: false, message: 'Invalid role for queue' });
-      }
-      if (user.role === 'female' && !user.isVerified) {
-        return cb?.({ ok: false, message: 'Female must be verified' });
-      }
-
-      // Add to queue
-      if (user.role === 'male')
-        maleQueue.set(socket.id, { socket, user, joinedAt: Date.now() });
-      else
-        femaleQueue.set(socket.id, { socket, user, joinedAt: Date.now() });
-
-      const match = findMatch(socket);
-      if (match) {
-        startCall(match.initiator, match.receiver);
-        cb?.({ ok: true, message: 'Matched! Connecting you...' });
-      } else {
-        cb?.({ ok: true, message: 'Waiting for opposite gender...' });
-        socket.emit('waiting_status', {
-          message:
-            user.role === 'male'
-              ? 'No girls available right now'
-              : 'No boys available right now',
-        });
-      }
-    } catch (err) {
-      console.error(err);
-      cb?.({ ok: false, message: 'Server error' });
-    }
-  });
-
-  socket.on('leave_queue', () => {
-    maleQueue.delete(socket.id);
-    femaleQueue.delete(socket.id);
-  });
-
-  // Skip user: end current match and rejoin queue
-  socket.on('skip_user', async (data) => {
-    const { roomId } = data || {};
-    console.log(`🔁 ${user.email} skipped current chat.`);
-    await endCall(roomId, socket.id);
-
-    // Put the user back into queue
-    if (user.role === 'male') {
-      maleQueue.set(socket.id, { socket, user, joinedAt: Date.now() });
-    } else {
-      femaleQueue.set(socket.id, { socket, user, joinedAt: Date.now() });
-    }
-
-    const match = findMatch(socket);
-    if (match) startCall(match.initiator, match.receiver);
-    else
-      socket.emit('waiting_status', {
-        message: 'No users available, searching...',
-      });
-  });
-
-  // User leaves chat manually
-  socket.on('leave_chat', async () => {
-    console.log(`🚪 ${user.email} left chat.`);
-    for (const [roomId, info] of activeCalls.entries()) {
-      if (
-        info.callerSocketId === socket.id ||
-        info.calleeSocketId === socket.id
-      ) {
-        await endCall(roomId, socket.id);
-      }
-    }
-  });
-
-  // WebRTC signaling (offer/answer)
-  socket.on('signal', (data) => {
-    const { roomId, description } = data || {};
-    if (!roomId || !description) return;
-    socket.to(roomId).emit('signal', { from: socket.id, description });
-  });
-
-  // ICE candidate relay
-  socket.on('ice_candidate', (data) => {
-    const { roomId, candidate } = data || {};
-    if (!roomId || !candidate) return;
-    socket.to(roomId).emit('ice_candidate', { from: socket.id, candidate });
-  });
-
-  // In-call chat message
-  socket.on('chat_message', (data) => {
-    const { roomId, text } = data || {};
-    if (!roomId || !text) return;
-    io.to(roomId).emit('chat_message', {
-      from: {
-        id: socket.user._id,
-        name: socket.user.firstName || socket.user.email,
-      },
-      text,
-      ts: Date.now(),
-    });
-  });
-
-  // end call
-  socket.on('end_call', async (data) => {
-    const { roomId } = data || {};
-    await endCall(roomId, socket.id);
-  });
-
-  socket.on('disconnect', async () => {
-    console.log(`❌ Disconnected: ${socket.id} (${user.email})`);
-    maleQueue.delete(socket.id);
-    femaleQueue.delete(socket.id);
-
-    for (const [roomId, info] of activeCalls.entries()) {
-      if (
-        info.callerSocketId === socket.id ||
-        info.calleeSocketId === socket.id
-      ) {
-        await endCall(roomId, socket.id);
-      }
-    }
-  });
-  socket.on("toggle_media", (data) => {
-  const { roomId, kind, enabled } = data;
-  socket.to(roomId).emit("remote_toggle_media", { kind, enabled });
-});
-
-});
-
-// match male↔female
-function findMatch(socket) {
-  const user = socket.user;
-  if (user.role === 'male') {
-    const femaleEntry = [...femaleQueue.values()].sort(
-      (a, b) => a.joinedAt - b.joinedAt
-    )[0];
+// ----------------------------
+// Helper: find match
+// ----------------------------
+function findMatchForUser(user) {
+  if (!user || !user.role) return null;
+  if (user.role === "male") {
+    const femaleEntry = [...femaleQueue.values()].sort((a, b) => a.joinedAt - b.joinedAt)[0];
     if (femaleEntry) {
-      femaleQueue.delete(femaleEntry.socket.id);
-      maleQueue.delete(socket.id);
-      return { initiator: socket, receiver: femaleEntry.socket };
+      femaleQueue.delete(femaleEntry.user._id.toString());
+      maleQueue.delete(user._id.toString());
+      return { initiator: user, receiver: femaleEntry.user };
     }
-  } else {
-    const maleEntry = [...maleQueue.values()].sort(
-      (a, b) => a.joinedAt - b.joinedAt
-    )[0];
+  } else if (user.role === "female") {
+    const maleEntry = [...maleQueue.values()].sort((a, b) => a.joinedAt - b.joinedAt)[0];
     if (maleEntry) {
-      femaleQueue.delete(socket.id);
-      maleQueue.delete(maleEntry.socket.id);
-      return { initiator: maleEntry.socket, receiver: socket };
+      femaleQueue.delete(user._id.toString());
+      maleQueue.delete(maleEntry.user._id.toString());
+      return { initiator: maleEntry.user, receiver: user };
     }
   }
   return null;
 }
 
-// start call between matched users
-async function startCall(initiator, receiver) {
-  const roomId = `call_${initiator.id}_${receiver.id}_${Date.now()}`;
+// ----------------------------
+// API: Join matchmaking
+// ----------------------------
+app.post("/api/match/join", authMiddleware, async (req, res) => {
   try {
+    const user = req.user;
+    if (!user) return res.status(401).json({ ok: false, message: "Unauthorized" });
+    if (!["male", "female"].includes(user.role))
+      return res.status(400).json({ ok: false, message: "Invalid user role" });
+
+    if (user.role === "female" && !user.isVerified)
+      return res.status(403).json({ ok: false, message: "Female must be verified to join" });
+
+    const key = user._id.toString();
+    const now = Date.now();
+
+    // if user already has pending match
+    const pending = pendingMatches.get(key);
+    if (pending) {
+      pendingMatches.delete(key);
+      console.log(`✅ Pending match delivered to ${user.email}`);
+      return res.json(pending);
+    }
+
+    // add to queue
+    if (user.role === "male") maleQueue.set(key, { user, joinedAt: now });
+    else femaleQueue.set(key, { user, joinedAt: now });
+
+    const match = findMatchForUser(user);
+    if (!match) {
+      console.log(`${user.email} is waiting for a match...`);
+      return res.json({ ok: true, waiting: true, message: "Waiting for opposite gender..." });
+    }
+
+    // match found → create Agora channel
+    const channelName = `ch_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`;
+
     const callDoc = await Call.create({
-      caller: initiator.user._id,
-      callee: receiver.user._id,
+      caller: match.initiator._id,
+      callee: match.receiver._id,
       startedAt: new Date(),
-      status: 'active',
+      status: "active",
+      metadata: { source: "agora_matchmaking" },
     });
 
-    initiator.join(roomId);
-    receiver.join(roomId);
+    const initiatorAccount = match.initiator._id.toString();
+    const receiverAccount = match.receiver._id.toString();
 
+    const initiatorToken = generateAgoraTokenForAccount(channelName, initiatorAccount);
+    const receiverToken = generateAgoraTokenForAccount(channelName, receiverAccount);
+
+    const roomId = `call_${match.initiator._id}_${match.receiver._id}_${Date.now()}`;
     activeCalls.set(roomId, {
-      callerSocketId: initiator.id,
-      calleeSocketId: receiver.id,
-      callDocId: callDoc._id,
+      callerId: match.initiator._id.toString(),
+      calleeId: match.receiver._id.toString(),
+      callDocId: callDoc._id.toString(),
       startedAt: Date.now(),
+      channelName,
     });
 
-    // Emit matched event to both users
-    initiator.emit('matched', {
+    const initiatorResponse = {
+      ok: true,
+      matched: true,
       roomId,
-      role: 'caller',
-      other: receiver.user,
-    });
-    receiver.emit('matched', {
+      channelName,
+      yourToken: initiatorToken,
+      yourAccount: initiatorAccount,
+      role: "caller",
+      other: {
+        _id: match.receiver._id,
+        firstName: match.receiver.firstName,
+        role: match.receiver.role,
+      },
+    };
+
+    const receiverResponse = {
+      ok: true,
+      matched: true,
       roomId,
-      role: 'callee',
-      other: initiator.user,
-    });
+      channelName,
+      yourToken: receiverToken,
+      yourAccount: receiverAccount,
+      role: "callee",
+      other: {
+        _id: match.initiator._id,
+        firstName: match.initiator.firstName,
+        role: match.initiator.role,
+      },
+    };
+
+    // deliver one now, queue the other
+    if (user._id.toString() === match.initiator._id.toString()) {
+      pendingMatches.set(match.receiver._id.toString(), receiverResponse);
+      console.log(`✅ Match created: ${match.initiator.email} ↔ ${match.receiver.email}`);
+      return res.json(initiatorResponse);
+    } else {
+      pendingMatches.set(match.initiator._id.toString(), initiatorResponse);
+      console.log(`✅ Match created: ${match.receiver.email} ↔ ${match.initiator.email}`);
+      return res.json(receiverResponse);
+    }
   } catch (err) {
-    console.error('startCall error:', err);
+    console.error("match join error:", err);
+    return res.status(500).json({ ok: false, message: "Server error" });
   }
-}
+});
 
-// finish and clean call
-async function endCall(roomId, endedBySocketId) {
-  const info = activeCalls.get(roomId);
-  if (!info) return;
+// ----------------------------
+// Leave queue
+// ----------------------------
+app.post("/api/match/leave", authMiddleware, (req, res) => {
+  const user = req.user;
+  if (!user) return res.status(401).json({ ok: false, message: "Unauthorized" });
+  const key = user._id.toString();
+  maleQueue.delete(key);
+  femaleQueue.delete(key);
+  res.json({ ok: true, message: "Left queue" });
+});
 
+// ----------------------------
+// End call
+// ----------------------------
+app.post("/api/call/end", authMiddleware, async (req, res) => {
   try {
+    const { roomId } = req.body;
+    if (!roomId) return res.status(400).json({ ok: false, message: "roomId required" });
+
+    const info = activeCalls.get(roomId);
+    if (!info) return res.status(404).json({ ok: false, message: "Active call not found" });
+
     const duration = Math.floor((Date.now() - info.startedAt) / 1000);
 
-    // Update call record
     const callDoc = await Call.findByIdAndUpdate(
       info.callDocId,
-      { endedAt: new Date(), durationSeconds: duration, status: 'completed' },
+      { endedAt: new Date(), durationSeconds: duration, status: "completed" },
       { new: true }
-    ).populate(['caller', 'callee']);
+    );
 
-    // ✅ Update total video seconds for both users
-    if (callDoc?.caller) {
-      await User.findByIdAndUpdate(callDoc.caller._id, {
-        $inc: { totalVideoSeconds: duration },
-      });
-    }
-    if (callDoc?.callee) {
-      await User.findByIdAndUpdate(callDoc.callee._id, {
-        $inc: { totalVideoSeconds: duration },
-      });
-    }
-
-    // Notify both peers
-    io.to(roomId).emit('call_ended', {
-      roomId,
-      endedBy: endedBySocketId,
-      duration,
-    });
+    if (callDoc?.caller) await User.findByIdAndUpdate(callDoc.caller, { $inc: { totalVideoSeconds: duration } });
+    if (callDoc?.callee) await User.findByIdAndUpdate(callDoc.callee, { $inc: { totalVideoSeconds: duration } });
 
     activeCalls.delete(roomId);
+    return res.json({ ok: true, message: "Call ended", duration });
   } catch (err) {
-    console.error('endCall error:', err);
+    console.error("call end error:", err);
+    return res.status(500).json({ ok: false, message: "Server error" });
   }
-}
-
-// total time spent by user
-// const totalSeconds = await Call.aggregate([
-//   { $match: { $or: [{ caller: UserId }, { callee: UserId }] } },
-//   { $group: { _id: null, total: { $sum: "$durationSeconds" } } }
-// ]);
+});
 
 // ----------------------------
-// PERIODIC QUEUE STATUS UPDATES
+// Get fresh Agora token (account-based)
 // ----------------------------
-setInterval(() => {
-  maleQueue.forEach(({ socket }) =>
-    socket.emit('waiting_status', { message: 'No girls available right now' })
-  );
-  femaleQueue.forEach(({ socket }) =>
-    socket.emit('waiting_status', { message: 'No boys available right now' })
-  );
-}, 10000);
+app.post("/api/agora/token", authMiddleware, (req, res) => {
+  try {
+    const { channelName } = req.body;
+    if (!channelName)
+      return res.status(400).json({ ok: false, message: "channelName required" });
+
+    const account = req.user._id.toString();
+    const token = generateAgoraTokenForAccount(channelName, account);
+    return res.json({ ok: true, token, channelName, appId: AGORA_APP_ID });
+  } catch (err) {
+    console.error("agora token error:", err);
+    return res.status(500).json({ ok: false, message: "Server error" });
+  }
+});
 
 // ----------------------------
-// START SERVER
+// Start server
 // ----------------------------
 const PORT = process.env.PORT || 5000;
-httpServer.listen(PORT, () =>
-  console.log(`🚀 Server + Socket.IO running on port ${PORT}`)
-);
+app.listen(PORT, () => {
+  console.log(`🚀 Server (Agora, account-based) running on port ${PORT}`);
+});
