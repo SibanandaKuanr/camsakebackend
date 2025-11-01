@@ -7,6 +7,7 @@ import cors from "cors";
 import connectDB from "./config/db.js";
 import authRoutes from "./routes/authRoutes.js";
 import adminRoutes from "./routes/adminRoutes.js";
+import friendRoutes from "./routes/friendroutes.js";
 import authMiddleware from "./middleware/authMiddleware.js";
 import Call from "./models/Call.js";
 import User from "./models/User.js";
@@ -14,6 +15,12 @@ import User from "./models/User.js";
 // Agora token builder
 import pkg from "agora-access-token";
 const { RtcTokenBuilder, RtcRole } = pkg;
+import { createClient } from "@supabase/supabase-js";
+
+const supabase = createClient(
+  process.env.SUPABASE_URL,
+  process.env.SUPABASE_SERVICE_ROLE_KEY
+);
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
@@ -30,7 +37,7 @@ app.use("/uploads", express.static(join(__dirname, "uploads")));
 // routes
 app.use("/api/auth", authRoutes);
 app.use("/api/admin", adminRoutes);
-
+app.use("/api/friends", friendRoutes);
 app.get("/", (req, res) => res.send("MERN + Agora backend running"));
 
 // ----------------------------
@@ -255,6 +262,50 @@ app.post("/api/agora/token", authMiddleware, (req, res) => {
     return res.json({ ok: true, token, channelName, appId: AGORA_APP_ID });
   } catch (err) {
     console.error("agora token error:", err);
+    return res.status(500).json({ ok: false, message: "Server error" });
+  }
+});
+// ----------------------------
+// Supabase Chat Endpoints
+// ----------------------------
+
+// Save a message
+app.post("/api/chat/send", authMiddleware, async (req, res) => {
+  try {
+    const { roomId, receiverId, message } = req.body;
+    const senderId = req.user._id.toString();
+
+    if (!roomId || !message)
+      return res.status(400).json({ ok: false, message: "roomId and message required" });
+
+    const { data, error } = await supabase
+      .from("chats")
+      .insert([{ call_room_id: roomId, sender_id: senderId, receiver_id: receiverId, message }])
+      .select();
+
+    if (error) throw error;
+    return res.json({ ok: true, message: "Message sent", data });
+  } catch (err) {
+    console.error("chat send error:", err);
+    return res.status(500).json({ ok: false, message: "Server error" });
+  }
+});
+
+// Get all messages for a call
+app.get("/api/chat/:roomId", authMiddleware, async (req, res) => {
+  try {
+    const { roomId } = req.params;
+
+    const { data, error } = await supabase
+      .from("chats")
+      .select("*")
+      .eq("call_room_id", roomId)
+      .order("created_at", { ascending: true });
+
+    if (error) throw error;
+    return res.json({ ok: true, messages: data });
+  } catch (err) {
+    console.error("chat fetch error:", err);
     return res.status(500).json({ ok: false, message: "Server error" });
   }
 });

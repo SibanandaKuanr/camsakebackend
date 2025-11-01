@@ -8,6 +8,7 @@
     "dev": "nodemon server.js"
   },
   "dependencies": {
+    "@supabase/supabase-js": "^2.76.1",
     "agora-access-token": "^2.0.4",
     "bcryptjs": "^3.0.2",
     "cloudinary": "^2.7.0",

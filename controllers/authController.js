@@ -92,7 +92,7 @@ export const login = async (req, res) => {
 
     res.json({
       token,
-      user: { id: user._id, email: user.email, role: user.role, isVerified: user.isVerified }
+      user: { id: user._id, email: user.email, role: user.role, isVerified: user.isVerified,firstname: user.firstName, lastname: user.lastName }
     });
   } catch (err) {
     console.error(err);
