@@ -174,7 +174,7 @@ export const uploadVerificationVideo = async (req, res) => {
 export const getProfile = async (req, res) => {
   const user = req.user;
   res.json({ user: {
-    id: user._id, email: user.email, role: user.role, isVerified: user.isVerified,
+    id: user._id, email: user.email, role: user.role, isVerified: user.isVerified, firstName:user.firstName, lastName:user.lastName,
     verificationStatus: user.verificationStatus, verificationVideoUrl: user.verificationVideoUrl
   }});
 };

@@ -9,7 +9,7 @@ import authRoutes from "./routes/authRoutes.js";
 import adminRoutes from "./routes/adminRoutes.js";
 import friendRoutes from "./routes/friendroutes.js";
 import authMiddleware from "./middleware/authMiddleware.js";
-import Call from "./models/Call.js";
+import Call from "./models/call.js";
 import User from "./models/User.js";
 
 // Agora token builder
@@ -70,35 +70,55 @@ function generateAgoraTokenForAccount(
 }
 
 // ----------------------------
+// ----------------------------
 // In-memory matchmaking queues
 // ----------------------------
-const maleQueue = new Map();
-const femaleQueue = new Map();
+const waitingQueue = new Map(); // unified queue
 const activeCalls = new Map();
-const pendingMatches = new Map(); // <- missing before
+const pendingMatches = new Map();
 
 // ----------------------------
 // Helper: find match
 // ----------------------------
-function findMatchForUser(user) {
-  if (!user || !user.role) return null;
-  if (user.role === "male") {
-    const femaleEntry = [...femaleQueue.values()].sort((a, b) => a.joinedAt - b.joinedAt)[0];
-    if (femaleEntry) {
-      femaleQueue.delete(femaleEntry.user._id.toString());
-      maleQueue.delete(user._id.toString());
-      return { initiator: user, receiver: femaleEntry.user };
+function findMatchForUser(currentUser) {
+  const now = Date.now();
+
+  for (const [key, { user: queuedUser, joinedAt }] of waitingQueue.entries()) {
+    if (queuedUser._id.toString() === currentUser._id.toString()) continue;
+
+    // ❌ Skip expired queue entries (wait > 60 sec)
+    if (now - joinedAt > 60000) {
+      waitingQueue.delete(key);
+      continue;
     }
-  } else if (user.role === "female") {
-    const maleEntry = [...maleQueue.values()].sort((a, b) => a.joinedAt - b.joinedAt)[0];
-    if (maleEntry) {
-      femaleQueue.delete(user._id.toString());
-      maleQueue.delete(maleEntry.user._id.toString());
-      return { initiator: maleEntry.user, receiver: user };
+
+    // ✅ 1. Check gender compatibility
+    const currentPref = currentUser.lookingFor || "both";
+    const queuedPref = queuedUser.lookingFor || "both";
+
+    const currentMatchesQueued =
+      currentPref === "both" || queuedUser.role === currentPref;
+    const queuedMatchesCurrent =
+      queuedPref === "both" || currentUser.role === queuedPref;
+
+    if (!currentMatchesQueued || !queuedMatchesCurrent) {
+      continue; // ❌ Skip — gender preference mismatch
     }
+
+    // ✅ 2. Found a valid match
+    waitingQueue.delete(key);
+    return { initiator: currentUser, receiver: queuedUser };
   }
-  return null;
+
+  return null; // ❌ No match found yet
 }
+
+
+
+
+
+
+
 
 // ----------------------------
 // API: Join matchmaking
@@ -107,16 +127,12 @@ app.post("/api/match/join", authMiddleware, async (req, res) => {
   try {
     const user = req.user;
     if (!user) return res.status(401).json({ ok: false, message: "Unauthorized" });
-    if (!["male", "female"].includes(user.role))
-      return res.status(400).json({ ok: false, message: "Invalid user role" });
 
-    if (user.role === "female" && !user.isVerified)
-      return res.status(403).json({ ok: false, message: "Female must be verified to join" });
-
+    const { lookingFor = "both" } = req.body;
     const key = user._id.toString();
     const now = Date.now();
 
-    // if user already has pending match
+    // ✅ 1. Check if this user already has a pending match
     const pending = pendingMatches.get(key);
     if (pending) {
       pendingMatches.delete(key);
@@ -124,26 +140,22 @@ app.post("/api/match/join", authMiddleware, async (req, res) => {
       return res.json(pending);
     }
 
-    // add to queue
-    if (user.role === "male") maleQueue.set(key, { user, joinedAt: now });
-    else femaleQueue.set(key, { user, joinedAt: now });
+    // ✅ 2. Create updated user object
+    const updatedUser = { ...user.toObject?.() || user, lookingFor };
 
-    const match = findMatchForUser(user);
+    // ✅ 3. Add to queue
+    waitingQueue.set(key, { user: updatedUser, joinedAt: now });
+
+    // ✅ 4. Try to find a match
+    const match = findMatchForUser(updatedUser);
+
     if (!match) {
-      console.log(`${user.email} is waiting for a match...`);
-      return res.json({ ok: true, waiting: true, message: "Waiting for opposite gender..." });
+      console.log(`${user.email} waiting for a match (${lookingFor})...`);
+      return res.json({ ok: true, waiting: true, message: "Waiting..." });
     }
 
-    // match found → create Agora channel
+    // ✅ 5. Match found → create Agora room
     const channelName = `ch_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`;
-
-    const callDoc = await Call.create({
-      caller: match.initiator._id,
-      callee: match.receiver._id,
-      startedAt: new Date(),
-      status: "active",
-      metadata: { source: "agora_matchmaking" },
-    });
 
     const initiatorAccount = match.initiator._id.toString();
     const receiverAccount = match.receiver._id.toString();
@@ -151,15 +163,9 @@ app.post("/api/match/join", authMiddleware, async (req, res) => {
     const initiatorToken = generateAgoraTokenForAccount(channelName, initiatorAccount);
     const receiverToken = generateAgoraTokenForAccount(channelName, receiverAccount);
 
-    const roomId = `call_${match.initiator._id}_${match.receiver._id}_${Date.now()}`;
-    activeCalls.set(roomId, {
-      callerId: match.initiator._id.toString(),
-      calleeId: match.receiver._id.toString(),
-      callDocId: callDoc._id.toString(),
-      startedAt: Date.now(),
-      channelName,
-    });
+    const roomId = `call_${initiatorAccount}_${receiverAccount}_${Date.now()}`;
 
+    // ✅ 6. Store both responses
     const initiatorResponse = {
       ok: true,
       matched: true,
@@ -190,21 +196,22 @@ app.post("/api/match/join", authMiddleware, async (req, res) => {
       },
     };
 
-    // deliver one now, queue the other
-    if (user._id.toString() === match.initiator._id.toString()) {
-      pendingMatches.set(match.receiver._id.toString(), receiverResponse);
-      console.log(`✅ Match created: ${match.initiator.email} ↔ ${match.receiver.email}`);
-      return res.json(initiatorResponse);
-    } else {
-      pendingMatches.set(match.initiator._id.toString(), initiatorResponse);
-      console.log(`✅ Match created: ${match.receiver.email} ↔ ${match.initiator.email}`);
-      return res.json(receiverResponse);
-    }
+    // ✅ 7. Save the receiver's response in pendingMatches
+    pendingMatches.set(match.receiver._id.toString(), receiverResponse);
+
+    console.log(
+      `✅ Match created: ${match.initiator.email} ↔ ${match.receiver.email}`
+    );
+
+    // ✅ 8. Send initiator's response
+    return res.json(initiatorResponse);
   } catch (err) {
     console.error("match join error:", err);
     return res.status(500).json({ ok: false, message: "Server error" });
   }
 });
+
+
 
 // ----------------------------
 // Leave queue
@@ -213,10 +220,10 @@ app.post("/api/match/leave", authMiddleware, (req, res) => {
   const user = req.user;
   if (!user) return res.status(401).json({ ok: false, message: "Unauthorized" });
   const key = user._id.toString();
-  maleQueue.delete(key);
-  femaleQueue.delete(key);
+  waitingQueue.delete(key);
   res.json({ ok: true, message: "Left queue" });
 });
+
 
 // ----------------------------
 // End call
