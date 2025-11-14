@@ -5,7 +5,8 @@
   "main": "server.js",
   "scripts": {
     "start": "node server.js",
-    "dev": "nodemon server.js"
+    "dev": "nodemon server.js",
+    "build": "esbuild server.js --bundle --platform=node --outfile=dist/server.js --minify"
   },
   "dependencies": {
     "@supabase/supabase-js": "^2.76.1",
@@ -23,6 +24,7 @@
     "socket.io": "^4.8.1"
   },
   "devDependencies": {
+    "esbuild": "^0.19.0",
     "nodemon": "^2.0.22"
   }
 }

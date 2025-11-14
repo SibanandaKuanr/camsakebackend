@@ -7,7 +7,7 @@ import cors from "cors";
 import connectDB from "./config/db.js";
 import authRoutes from "./routes/authRoutes.js";
 import adminRoutes from "./routes/adminRoutes.js";
-import friendRoutes from "./routes/friendroutes.js";
+import friendRoutes from "./routes/friendRoutes.js";
 import subscriptionRoutes from "./routes/subscriptionRoutes.js";
 import messageRoutes from "./routes/messageRoutes.js";
 import authMiddleware from "./middleware/authMiddleware.js";
