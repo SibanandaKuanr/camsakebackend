@@ -1,9 +1,10 @@
 // middleware/authMiddleware.js
-import jwt from 'jsonwebtoken';
+import admin from '../config/firebase.js';
 import User from '../models/User.js';
 
 /**
  * Express middleware for HTTP routes
+ * Verifies Firebase ID tokens
  */
 const authMiddleware = async (req, res, next) => {
   try {
@@ -12,13 +13,37 @@ const authMiddleware = async (req, res, next) => {
       return res.status(401).json({ message: 'No token provided' });
     }
 
-    const token = header.split(' ')[1];
-    const decoded = jwt.verify(token, process.env.JWT_SECRET);
-    const user = await User.findById(decoded.id);
+    const idToken = header.split(' ')[1];
+    
+    // Verify Firebase ID token
+    let decodedToken;
+    try {
+      decodedToken = await admin.auth().verifyIdToken(idToken);
+    } catch (error) {
+      console.error('Token verification error:', error);
+      return res.status(401).json({ message: 'Invalid or expired token' });
+    }
 
-    if (!user) return res.status(401).json({ message: 'User not found' });
+    // Find user in our database by email or firebaseUid
+    const user = await User.findOne({ 
+      $or: [
+        { email: decodedToken.email },
+        { firebaseUid: decodedToken.uid }
+      ]
+    });
+
+    if (!user) {
+      return res.status(401).json({ message: 'User not found in database' });
+    }
+
+    // Update firebaseUid if not set
+    if (!user.firebaseUid) {
+      user.firebaseUid = decodedToken.uid;
+      await user.save();
+    }
 
     req.user = user;
+    req.firebaseUser = decodedToken; // Store Firebase user info for reference
     next();
   } catch (err) {
     console.error('Auth error:', err);
@@ -29,7 +54,7 @@ const authMiddleware = async (req, res, next) => {
 /**
  * Socket.IO authentication helper
  * - Called from io.use() middleware
- * - Verifies JWT token passed in handshake (auth.token or query.token)
+ * - Verifies Firebase ID token passed in handshake (auth.token or query.token)
  * - Returns user or null
  */
 export const socketAuth = async (socket, next) => {
@@ -48,15 +73,35 @@ export const socketAuth = async (socket, next) => {
       ? token.split(' ')[1]
       : token;
 
-    const decoded = jwt.verify(cleanToken, process.env.JWT_SECRET);
-    const user = await User.findById(decoded.id);
+    // Verify Firebase ID token
+    let decodedToken;
+    try {
+      decodedToken = await admin.auth().verifyIdToken(cleanToken);
+    } catch (error) {
+      return next(new Error('Invalid or expired token'));
+    }
+
+    // Find user in our database
+    const user = await User.findOne({ 
+      $or: [
+        { email: decodedToken.email },
+        { firebaseUid: decodedToken.uid }
+      ]
+    });
 
     if (!user) {
       return next(new Error('User not found'));
     }
 
+    // Update firebaseUid if not set
+    if (!user.firebaseUid) {
+      user.firebaseUid = decodedToken.uid;
+      await user.save();
+    }
+
     // Attach user to socket
     socket.user = user;
+    socket.firebaseUser = decodedToken;
     next();
   } catch (err) {
     console.error('Socket auth error:', err.message);
@@ -65,7 +110,7 @@ export const socketAuth = async (socket, next) => {
 };
 
 /**
- * Utility function to verify token manually (optional)
+ * Utility function to verify Firebase ID token manually (optional)
  * Can be used elsewhere if you just have a token string.
  */
 export const verifySocketToken = async (token) => {
@@ -74,8 +119,14 @@ export const verifySocketToken = async (token) => {
     const cleanToken = token.startsWith('Bearer ')
       ? token.split(' ')[1]
       : token;
-    const decoded = jwt.verify(cleanToken, process.env.JWT_SECRET);
-    const user = await User.findById(decoded.id);
+    
+    const decodedToken = await admin.auth().verifyIdToken(cleanToken);
+    const user = await User.findOne({ 
+      $or: [
+        { email: decodedToken.email },
+        { firebaseUid: decodedToken.uid }
+      ]
+    });
     return user || null;
   } catch {
     return null;

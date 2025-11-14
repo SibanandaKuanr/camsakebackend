@@ -66,7 +66,7 @@ export const acceptFriendRequest = async (req, res) => {
 export const getFriends = async (req, res) => {
   try {
     const user = await User.findById(req.user._id)
-      .populate("friends.user", "firstName lastName email role")
+      .populate("friends.user", "firstName lastName email role profilePicture")
       .lean();
 
     res.json({ friends: user.friends || [] });

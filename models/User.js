@@ -27,7 +27,9 @@ const UserSchema = new mongoose.Schema({
     lowercase: true,
     trim: true,
   },
-  password: { type: String },
+  password: { type: String }, // Deprecated - keeping for backward compatibility
+  firebaseUid: { type: String, unique: true, sparse: true }, // Firebase Authentication UID
+  profilePicture: { type: String }, // Profile picture URL (from Google or uploaded)
   role: { type: String, enum: ["male", "female", "admin"], required: true },
   isAdmin: { type: Boolean, default: false },
 
@@ -43,8 +45,22 @@ const UserSchema = new mongoose.Schema({
   totalVideoSeconds: { type: Number, default: 0 },
   createdAt: { type: Date, default: Date.now },
 
+  // ✅ Subscription system
+  subscriptionType: { 
+    type: String, 
+    enum: ["free", "premium"], 
+    default: "free" 
+  },
+
   // ✅ NEW: Friendship system
   friends: [FriendSchema], // current friends or pending requests
+  
+  // ✅ Block and Report system
+  blockedUsers: [{ type: mongoose.Schema.Types.ObjectId, ref: "User" }],
+  
+  // ✅ Online status
+  isOnline: { type: Boolean, default: false },
+  lastSeen: { type: Date, default: Date.now },
 });
 
 export default mongoose.model("User", UserSchema);

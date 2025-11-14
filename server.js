@@ -8,6 +8,8 @@ import connectDB from "./config/db.js";
 import authRoutes from "./routes/authRoutes.js";
 import adminRoutes from "./routes/adminRoutes.js";
 import friendRoutes from "./routes/friendroutes.js";
+import subscriptionRoutes from "./routes/subscriptionRoutes.js";
+import messageRoutes from "./routes/messageRoutes.js";
 import authMiddleware from "./middleware/authMiddleware.js";
 import Call from "./models/call.js";
 import User from "./models/User.js";
@@ -21,6 +23,20 @@ const supabase = createClient(
   process.env.SUPABASE_URL,
   process.env.SUPABASE_SERVICE_ROLE_KEY
 );
+
+// Quick Supabase connectivity check at startup to fail fast and provide a clearer log
+async function checkSupabaseConnectivity() {
+  try {
+    // Try a light read from a likely-existing table (chats) to verify network/connectivity
+    await supabase.from("chats").select("id").limit(1);
+    console.log("✅ Supabase connectivity OK");
+  } catch (err) {
+    console.error("⚠️ Supabase connectivity check failed:", err?.message || err);
+    // don't throw here to keep server running, but surface the issue in logs
+  }
+}
+
+checkSupabaseConnectivity();
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
@@ -38,6 +54,8 @@ app.use("/uploads", express.static(join(__dirname, "uploads")));
 app.use("/api/auth", authRoutes);
 app.use("/api/admin", adminRoutes);
 app.use("/api/friends", friendRoutes);
+app.use("/api/subscription", subscriptionRoutes);
+app.use("/api/messages", messageRoutes);
 app.get("/", (req, res) => res.send("MERN + Agora backend running"));
 
 // ----------------------------
@@ -129,6 +147,16 @@ app.post("/api/match/join", authMiddleware, async (req, res) => {
     if (!user) return res.status(401).json({ ok: false, message: "Unauthorized" });
 
     const { lookingFor = "both" } = req.body;
+    
+    // Check if user has premium subscription for specific gender filters
+    if ((lookingFor === "male" || lookingFor === "female") && user.subscriptionType !== "premium") {
+      return res.status(403).json({ 
+        ok: false, 
+        message: "Premium subscription required to use gender filters",
+        requiresPremium: true 
+      });
+    }
+    
     const key = user._id.toString();
     const now = Date.now();
 
