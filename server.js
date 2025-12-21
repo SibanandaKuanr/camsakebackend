@@ -10,6 +10,7 @@ import adminRoutes from "./routes/adminRoutes.js";
 import friendRoutes from "./routes/friendRoutes.js";
 import subscriptionRoutes from "./routes/subscriptionRoutes.js";
 import messageRoutes from "./routes/messageRoutes.js";
+import videoRoutes from "./routes/videoRoutes.js";
 import authMiddleware from "./middleware/authMiddleware.js";
 import Call from "./models/call.js";
 import User from "./models/User.js";
@@ -56,6 +57,7 @@ app.use("/api/admin", adminRoutes);
 app.use("/api/friends", friendRoutes);
 app.use("/api/subscription", subscriptionRoutes);
 app.use("/api/messages", messageRoutes);
+app.use("/api/video", videoRoutes);
 app.get("/", (req, res) => res.send("MERN + Agora backend running"));
 
 // ----------------------------
@@ -193,17 +195,36 @@ app.post("/api/match/join", authMiddleware, async (req, res) => {
 
     const roomId = `call_${initiatorAccount}_${receiverAccount}_${Date.now()}`;
 
+    // ✅ 6. Create Call doc + track as active so /api/call/end can finalize duration
+    const callDoc = await Call.create({
+      caller: match.initiator._id,
+      callee: match.receiver._id,
+      startedAt: new Date(),
+      status: "active",
+      metadata: { roomId, channelName },
+    });
+
+    activeCalls.set(roomId, {
+      callDocId: callDoc._id,
+      startedAt: Date.now(),
+      caller: initiatorAccount,
+      callee: receiverAccount,
+      channelName,
+    });
+
     // ✅ 6. Store both responses
     const initiatorResponse = {
       ok: true,
       matched: true,
       roomId,
+      callId: callDoc._id,
       channelName,
       yourToken: initiatorToken,
       yourAccount: initiatorAccount,
       role: "caller",
       other: {
         _id: match.receiver._id,
+        name: `${match.receiver.firstName || ""} ${match.receiver.lastName || ""}`.trim(),
         firstName: match.receiver.firstName,
         role: match.receiver.role,
       },
@@ -213,12 +234,14 @@ app.post("/api/match/join", authMiddleware, async (req, res) => {
       ok: true,
       matched: true,
       roomId,
+      callId: callDoc._id,
       channelName,
       yourToken: receiverToken,
       yourAccount: receiverAccount,
       role: "callee",
       other: {
         _id: match.initiator._id,
+        name: `${match.initiator.firstName || ""} ${match.initiator.lastName || ""}`.trim(),
         firstName: match.initiator.firstName,
         role: match.initiator.role,
       },
@@ -256,32 +279,70 @@ app.post("/api/match/leave", authMiddleware, (req, res) => {
 // ----------------------------
 // End call
 // ----------------------------
+// ----------------------------
+// End call (disconnect both users)
+// ----------------------------
 app.post("/api/call/end", authMiddleware, async (req, res) => {
   try {
-    const { roomId } = req.body;
+    const { roomId, callId, forceEnd } = req.body;
     if (!roomId) return res.status(400).json({ ok: false, message: "roomId required" });
 
     const info = activeCalls.get(roomId);
-    if (!info) return res.status(404).json({ ok: false, message: "Active call not found" });
+    const effectiveCallId = info?.callDocId || callId;
 
-    const duration = Math.floor((Date.now() - info.startedAt) / 1000);
+    if (!effectiveCallId) {
+      return res.status(404).json({ ok: false, message: "Active call not found" });
+    }
 
+    const startedAtMs = info?.startedAt;
+    const duration = startedAtMs ? Math.floor((Date.now() - startedAtMs) / 1000) : 0;
+
+    // update DB — mark call ended
     const callDoc = await Call.findByIdAndUpdate(
-      info.callDocId,
-      { endedAt: new Date(), durationSeconds: duration, status: "completed" },
-      { new: true }
-    );
+  effectiveCallId,
+  { endedAt: new Date(), durationSeconds: duration, status: "ended" },
+  { new: true }
+);
 
+
+    // update user video duration stats
     if (callDoc?.caller) await User.findByIdAndUpdate(callDoc.caller, { $inc: { totalVideoSeconds: duration } });
     if (callDoc?.callee) await User.findByIdAndUpdate(callDoc.callee, { $inc: { totalVideoSeconds: duration } });
 
+    // remove active call
     activeCalls.delete(roomId);
-    return res.json({ ok: true, message: "Call ended", duration });
+
+    // 🔥🔥 KEY FIX → notify both users via activeCalls memory
+    pendingMatches.delete(roomId);
+
+    // if a partner is still connected, notify them call ended
+    if (forceEnd) {
+      // broadcast event over plain HTTP — partner will poll status and end too
+      res.json({ ok: true, forceEnd: true, message: "Call ended for both users", duration });
+      return;
+    }
+
+    res.json({ ok: true, message: "Call ended for caller", duration });
+
   } catch (err) {
     console.error("call end error:", err);
     return res.status(500).json({ ok: false, message: "Server error" });
   }
 });
+app.post("/api/call/status", authMiddleware, async (req, res) => {
+  try {
+    const { callId } = req.body;
+    if (!callId) return res.status(400).json({ ok: false, message: "callId required" });
+
+    const call = await Call.findById(callId);
+    if (!call) return res.json({ ended: true });
+
+    return res.json({ ended: call.status !== "active" });
+  } catch (err) {
+    return res.status(500).json({ ended: true });
+  }
+});
+
 
 // ----------------------------
 // Get fresh Agora token (account-based)

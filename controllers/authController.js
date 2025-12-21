@@ -10,9 +10,48 @@ const saveLocalVideoUrl = (file) => {
   return `/uploads/${file.filename}`; // ensure Express serves /uploads as static
 };
 
+export const updateProfile = async (req, res) => {
+  try {
+    const user = req.user;
+    if (!user) return res.status(401).json({ message: 'Unauthorized' });
+
+    const { firstName, lastName, profilePicture, role, dateOfBirth } = req.body;
+
+    // Hard block gender/birthday changes
+    if (role || dateOfBirth) {
+      return res.status(400).json({ message: 'Gender and birthday cannot be changed' });
+    }
+
+    if (typeof firstName === 'string') user.firstName = firstName;
+    if (typeof lastName === 'string') user.lastName = lastName;
+    if (typeof profilePicture === 'string') user.profilePicture = profilePicture;
+
+    await user.save();
+
+    res.json({
+      user: {
+        id: user._id,
+        email: user.email,
+        role: user.role,
+        isVerified: user.isVerified,
+        firstName: user.firstName,
+        lastName: user.lastName,
+        dateOfBirth: user.dateOfBirth,
+        profilePicture: user.profilePicture,
+        subscriptionType: user.subscriptionType || 'free',
+        verificationStatus: user.verificationStatus,
+        verificationVideoUrl: user.verificationVideoUrl,
+      },
+    });
+  } catch (err) {
+    console.error('Update profile error:', err);
+    res.status(500).json({ message: 'Server error', error: err.message });
+  }
+};
+
 export const register = async (req, res) => {
   try {
-    const { idToken, role, firstName, lastName } = req.body;
+    const { idToken, role, firstName, lastName, dateOfBirth, profilePicture } = req.body;
     if (!idToken || !role) return res.status(400).json({ message: 'Firebase ID token and role required' });
 
     // Verify Firebase ID token
@@ -37,6 +76,8 @@ export const register = async (req, res) => {
     };
     if (firstName) userData.firstName = firstName;
     if (lastName) userData.lastName = lastName;
+    if (dateOfBirth) userData.dateOfBirth = dateOfBirth;
+    if (profilePicture) userData.profilePicture = profilePicture;
 
     if (role === 'male' || role === 'admin') {
       if (role === 'admin') userData.isAdmin = true;
@@ -62,6 +103,7 @@ export const register = async (req, res) => {
         isVerified: user.isVerified,
         firstname: user.firstName,
         lastname: user.lastName,
+        dateOfBirth: user.dateOfBirth,
         firebaseUid: decodedToken.uid,
         profilePicture: user.profilePicture,
         subscriptionType: user.subscriptionType || "free"
@@ -108,6 +150,7 @@ export const login = async (req, res) => {
         isVerified: user.isVerified,
         firstname: user.firstName, 
         lastname: user.lastName,
+        dateOfBirth: user.dateOfBirth,
         firebaseUid: decodedToken.uid,
         profilePicture: user.profilePicture,
         subscriptionType: user.subscriptionType || "free"
@@ -122,7 +165,7 @@ export const login = async (req, res) => {
 // Google Sign-in using Firebase Authentication
 export const googleSignIn = async (req, res) => {
   try {
-    const { idToken, role } = req.body;
+    const { idToken, role, dateOfBirth, firstName, lastName, profilePicture: profilePictureFromClient } = req.body;
     if (!idToken) return res.status(400).json({ message: 'Firebase ID token required' });
 
     // Verify Firebase ID token
@@ -142,7 +185,7 @@ export const googleSignIn = async (req, res) => {
       console.error('Error fetching Firebase user:', error);
     }
 
-    const profilePicture = firebaseUser?.photoURL || decodedToken.picture || null;
+    const profilePicture = profilePictureFromClient || firebaseUser?.photoURL || decodedToken.picture || null;
     
     let user = await User.findOne({ email });
     const isNewUser = !user;
@@ -159,8 +202,9 @@ export const googleSignIn = async (req, res) => {
       // Create new user in database
       user = new User({
         email,
-        firstName: decodedToken.name?.split(' ')[0] || undefined,
-        lastName: decodedToken.name?.split(' ').slice(1).join(' ') || undefined,
+        firstName: firstName || decodedToken.name?.split(' ')[0] || undefined,
+        lastName: lastName || decodedToken.name?.split(' ').slice(1).join(' ') || undefined,
+        dateOfBirth: dateOfBirth || undefined,
         role: role,
         firebaseUid: decodedToken.uid,
         profilePicture: profilePicture
@@ -180,12 +224,15 @@ export const googleSignIn = async (req, res) => {
       if (!user.firebaseUid) {
         user.firebaseUid = decodedToken.uid;
       }
-      if (!user.profilePicture && profilePicture) {
+      if (profilePicture) {
         user.profilePicture = profilePicture;
       }
-      // Update role only if provided (for existing users, this is optional)
-      if (role && user.role !== role) {
-        user.role = role;
+      if (firstName) user.firstName = firstName;
+      if (lastName) user.lastName = lastName;
+
+      // Gender and birthday are immutable once set
+      if (dateOfBirth && !user.dateOfBirth) {
+        user.dateOfBirth = dateOfBirth;
       }
       await user.save();
     }
@@ -200,6 +247,7 @@ export const googleSignIn = async (req, res) => {
         isVerified: user.isVerified,
         firstname: user.firstName,
         lastname: user.lastName,
+        dateOfBirth: user.dateOfBirth,
         firebaseUid: decodedToken.uid,
         profilePicture: user.profilePicture,
         subscriptionType: user.subscriptionType || "free"
@@ -247,6 +295,7 @@ export const getProfile = async (req, res) => {
     isVerified: user.isVerified, 
     firstName: user.firstName, 
     lastName: user.lastName,
+    dateOfBirth: user.dateOfBirth,
     profilePicture: user.profilePicture,
     subscriptionType: user.subscriptionType || "free",
     verificationStatus: user.verificationStatus, 

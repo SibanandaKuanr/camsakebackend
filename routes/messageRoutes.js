@@ -209,7 +209,21 @@ router.get("/status/:userId", authMiddleware, async (req, res) => {
     if (!user) {
       return res.status(404).json({ ok: false, message: "User not found" });
     }
-    res.json({ ok: true, isOnline: user.isOnline, lastSeen: user.lastSeen });
+
+    const lastSeenMs = user.lastSeen ? new Date(user.lastSeen).getTime() : 0;
+    const nowMs = Date.now();
+    // If user hasn't pinged recently, treat them as offline even if isOnline is still true.
+    const ONLINE_TTL_MS = 60 * 1000;
+    const isFresh = lastSeenMs > 0 && nowMs - lastSeenMs <= ONLINE_TTL_MS;
+    const computedOnline = Boolean(user.isOnline && isFresh);
+
+    // Auto-correct stale sessions
+    if (user.isOnline && !computedOnline) {
+      user.isOnline = false;
+      await user.save();
+    }
+
+    res.json({ ok: true, isOnline: computedOnline, lastSeen: user.lastSeen });
   } catch (err) {
     console.error("get status error:", err);
     return res.status(500).json({ ok: false, message: "Server error" });

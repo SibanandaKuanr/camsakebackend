@@ -1,7 +1,7 @@
 // routes/authRoutes.js
 import { Router } from 'express';
 
-import { register, login, googleSignIn, uploadVerificationVideo, getProfile } from '../controllers/authController.js';
+import { register, login, googleSignIn, uploadVerificationVideo, getProfile, updateProfile } from '../controllers/authController.js';
 import authMiddleware from '../middleware/authMiddleware.js';
 import { single } from '../middleware/uploadMiddleware.js';
 const router = Router();
@@ -18,6 +18,9 @@ router.post('/upload-verification-video', authMiddleware, single('video'), uploa
 
 // get profile
 router.get('/me', authMiddleware, getProfile);
+
+// update profile (protected) - only name/photo allowed
+router.patch('/profile', authMiddleware, updateProfile);
 
 export default router;
 

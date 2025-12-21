@@ -123,3 +123,31 @@ export const rejectFriendRequest = async (req, res) => {
     res.status(500).json({ message: "Server error" });
   }
 };
+
+// Unfriend (remove friendship from both users)
+export const unfriendUser = async (req, res) => {
+  try {
+    const userId = req.user._id;
+    const friendId = req.params.id;
+
+    if (String(userId) === String(friendId)) {
+      return res.status(400).json({ message: "You cannot unfriend yourself" });
+    }
+
+    // Remove the relationship from both users regardless of status
+    await User.updateOne(
+      { _id: userId },
+      { $pull: { friends: { user: friendId } } }
+    );
+
+    await User.updateOne(
+      { _id: friendId },
+      { $pull: { friends: { user: userId } } }
+    );
+
+    return res.json({ message: "Unfriended successfully" });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ message: "Server error" });
+  }
+};
