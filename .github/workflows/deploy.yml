@@ -36,6 +36,7 @@ jobs:
           [ -f .env.example ] && cp .env.example deploy/ || echo "No .env.example found"
           tar -czf deploy.tar.gz -C deploy .
 
+
       - name: Upload build artifact
         uses: actions/upload-artifact@v4
         with:
