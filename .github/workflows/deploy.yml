@@ -117,7 +117,7 @@ jobs:
           EC2_HOST: ${{ secrets.EC2_HOST }}
         run: |
           echo "Waiting for app to start..."
-          sleep 10
+          sleep 40
 
           for i in {1..2}; do
             echo "Attempt $i..."
