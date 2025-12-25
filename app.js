@@ -46,7 +46,13 @@ const app = express();
 connectDB();
 
 // middleware
-app.use(cors({ origin: "http://localhost:3000", credentials: true }));
+app.use(
+  cors({
+    origin: ["http://localhost:3000", "https://www.camsake.com", "https://camsake.com"],
+    credentials: true,
+  })
+);
+
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
 app.use("/uploads", express.static(join(__dirname, "uploads")));
@@ -410,6 +416,6 @@ app.get("/api/chat/:roomId", authMiddleware, async (req, res) => {
 // Start server
 // ----------------------------
 const PORT = process.env.PORT || 5000;
-app.listen(PORT, "0.0.0.0", () => {
+app.listen(PORT, () => {
   console.log(`🚀 Server running on port ${PORT}`);
 });
