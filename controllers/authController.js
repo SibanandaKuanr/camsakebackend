@@ -192,12 +192,12 @@ export const googleSignIn = async (req, res) => {
     
     if (!user) {
       // New user - require role (gender)
-      if (!role) {
-        return res.status(400).json({ 
-          message: 'Gender selection is required for new users', 
-          requiresGender: true 
-        });
-      }
+      // if (!role) {
+      //   return res.status(400).json({ 
+      //     message: 'Gender selection is required for new users', 
+      //     requiresGender: true 
+      //   });
+      // }
 
       // Create new user in database
       user = new User({
