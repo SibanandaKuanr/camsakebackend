@@ -83,7 +83,18 @@ export const getFriends = async (req, res) => {
   }
 };
 
+export const getFriendlists = async (req, res) => {
+  try {
+    const user = await User.findById(req.user._id)
+      .populate("friends.user", "firstName lastName email role profilePicture")
+      .lean();
 
+    res.json({ friends: user.friends || [] });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ message: "Server error" });
+  }
+};
 
 // Get opposite-gender users for friend suggestions
 export const getOppositeUsers = async (req, res) => {
