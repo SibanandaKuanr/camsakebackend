@@ -23,14 +23,14 @@ export const sendFriendRequest = async (req, res) => {
       return res.status(400).json({ message: "Request already sent" });
 
     // add pending friend to sender
-    await User.findByIdAndUpdate(senderId, {
-      $push: { friends: { user: receiverId, status: "pending" } },
-    });
+await User.findByIdAndUpdate(senderId, {
+  $push: { friends: { user: receiverId, status: "pending", direction: "sent" } },
+});
 
-    // add pending friend to receiver
-    await User.findByIdAndUpdate(receiverId, {
-      $push: { friends: { user: senderId, status: "pending" } },
-    });
+// add pending friend to receiver
+await User.findByIdAndUpdate(receiverId, {
+  $push: { friends: { user: senderId, status: "pending", direction: "received" } },
+});
 
     return res.json({ message: "Friend request sent" });
   } catch (err) {
@@ -69,12 +69,21 @@ export const getFriends = async (req, res) => {
       .populate("friends.user", "firstName lastName email role profilePicture")
       .lean();
 
-    res.json({ friends: user.friends || [] });
+    // show received requests including old entries without direction
+    const receivedRequests = (user.friends || []).filter(
+      (f) =>
+        (f.direction === "received" || !f.direction) &&
+        f.status === "pending"
+    );
+
+    res.json({ friends: receivedRequests });
   } catch (err) {
     console.error(err);
     res.status(500).json({ message: "Server error" });
   }
 };
+
+
 
 // Get opposite-gender users for friend suggestions
 export const getOppositeUsers = async (req, res) => {

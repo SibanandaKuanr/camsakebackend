@@ -21,7 +21,7 @@ const authMiddleware = async (req, res, next) => {
       decodedToken = await admin.auth().verifyIdToken(idToken);
     } catch (error) {
       console.error('Token verification error:', error);
-      return res.status(401).json({ message: 'Invalid or expired token' });
+      return res.status(401).json({});
     }
 
     // Find user in our database by email or firebaseUid
@@ -33,7 +33,7 @@ const authMiddleware = async (req, res, next) => {
     });
 
     if (!user) {
-      return res.status(401).json({ message: 'User not found in database' });
+      return res.status(401).json();
     }
 
     // Update firebaseUid if not set
@@ -78,7 +78,7 @@ export const socketAuth = async (socket, next) => {
     try {
       decodedToken = await admin.auth().verifyIdToken(cleanToken);
     } catch (error) {
-      return next(new Error('Invalid or expired token'));
+      return ;
     }
 
     // Find user in our database
@@ -90,7 +90,7 @@ export const socketAuth = async (socket, next) => {
     });
 
     if (!user) {
-      return next(new Error('User not found'));
+      return ;
     }
 
     // Update firebaseUid if not set

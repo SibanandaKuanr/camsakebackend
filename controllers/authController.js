@@ -59,7 +59,7 @@ export const register = async (req, res) => {
     try {
       decodedToken = await admin.auth().verifyIdToken(idToken);
     } catch (error) {
-      return res.status(401).json({ message: 'Invalid or expired token', error: error.message });
+      return res.status(401).json({ error: error.message });
     }
 
     const email = decodedToken.email;
@@ -125,14 +125,14 @@ export const login = async (req, res) => {
     try {
       decodedToken = await admin.auth().verifyIdToken(idToken);
     } catch (error) {
-      return res.status(401).json({ message: 'Invalid or expired token', error: error.message });
+      return res.status(401).json({error: error.message });
     }
 
     // Find user in our database
     const user = await User.findOne({ email: decodedToken.email });
     
     if (!user) {
-      return res.status(404).json({ message: 'User not found in database. Please register first.' });
+      return res.status(404).json();
     }
 
     // Update Firebase UID if not set
@@ -173,7 +173,7 @@ export const googleSignIn = async (req, res) => {
     try {
       decodedToken = await admin.auth().verifyIdToken(idToken);
     } catch (error) {
-      return res.status(401).json({ message: 'Invalid or expired token', error: error.message });
+      return res.status(401).json({error: error.message });
     }
 
     const email = decodedToken.email;
@@ -258,7 +258,13 @@ export const googleSignIn = async (req, res) => {
     res.status(401).json({ message: 'Authentication failed', error: err.message });
   }
 };
-
+const createBackendToken = (userId) => {
+  return jwt.sign(
+    { id: userId },
+    process.env.JWT_SECRET,
+    { expiresIn: "7d" } // 👈 expires in 7 days (change as needed)
+  );
+};
 
 
 
