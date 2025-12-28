@@ -11,55 +11,151 @@ const supabase = createClient(
 );
 
 // Upload file and send message
+// Upload file and send message
+// Send text message (without file)
+router.post("/send-text", authMiddleware, async (req, res) => {
+  try {
+    const senderId = req.user._id.toString();
+    const { receiverId, message } = req.body;
+
+    if (!receiverId || !message) {
+      return res.status(400).json({
+        ok: false,
+        message: "receiverId and message required",
+      });
+    }
+
+    // Fetch both users
+    const [sender, receiver] = await Promise.all([
+      User.findById(senderId).select("blockedUsers"),
+      User.findById(receiverId).select("blockedUsers"),
+    ]);
+
+    if (!sender || !receiver) {
+      return res.status(404).json({
+        ok: false,
+        message: "User not found",
+      });
+    }
+
+    // 🔒 HARD BLOCK CHECK (BOTH SIDES)
+    const senderBlockedReceiver = sender.blockedUsers?.some(
+      (id) => id.toString() === receiverId
+    );
+
+    const receiverBlockedSender = receiver.blockedUsers?.some(
+      (id) => id.toString() === senderId
+    );
+
+    if (senderBlockedReceiver || receiverBlockedSender) {
+      return res.status(403).json({
+        ok: false,
+        message: "You cannot message this user",
+        blocked: true
+      });
+    }
+
+    // Insert message to Supabase
+    const { data, error } = await supabase
+      .from("private_chats")
+      .insert([{
+        sender_id: senderId,
+        receiver_id: receiverId,
+        message: message,
+        message_type: "text",
+      }])
+      .select();
+
+    if (error) throw error;
+
+    // ✅ Emit WebSocket event for real-time delivery
+    const io = req.app.get("io");
+    if (io && data && data[0]) {
+      console.log("📡 Emitting message:new event:", data[0]);
+      io.emit("message:new", {
+        ...data[0],
+        senderId: senderId,
+        receiverId: receiverId
+      });
+    }
+
+    return res.json({
+      ok: true,
+      
+      data: data[0],
+    });
+  } catch (err) {
+    console.error("send text message error:", err);
+    return res.status(500).json({
+      ok: false,
+      message: "Server error",
+      error: err?.message ?? String(err),
+    });
+  }
+});
 router.post("/send", authMiddleware, messageFile("file"), async (req, res) => {
   try {
     const senderId = req.user._id.toString();
     const { receiverId, message, messageType = "text" } = req.body;
 
     if (!receiverId) {
-      return res.status(400).json({ ok: false, message: "receiverId required" });
+      return res.status(400).json({
+        ok: false,
+        message: "receiverId required",
+      });
     }
 
-    // Check if receiver is blocked
-    const sender = await User.findById(senderId);
-    if (sender.blockedUsers?.includes(receiverId)) {
-      return res.status(403).json({ ok: false, message: "Cannot send message to blocked user" });
+    // Fetch both users
+    const [sender, receiver] = await Promise.all([
+      User.findById(senderId).select("blockedUsers"),
+      User.findById(receiverId).select("blockedUsers"),
+    ]);
+
+    if (!sender || !receiver) {
+      return res.status(404).json({
+        ok: false,
+        message: "User not found",
+      });
     }
 
-    // Check if sender is blocked by receiver
-    const receiver = await User.findById(receiverId);
-    if (receiver.blockedUsers?.includes(senderId)) {
-      return res.status(403).json({ ok: false, message: "You are blocked by this user" });
+    // 🔒 HARD BLOCK CHECK (BOTH SIDES)
+    const senderBlockedReceiver = sender.blockedUsers?.some(
+      (id) => id.toString() === receiverId
+    );
+
+    const receiverBlockedSender = receiver.blockedUsers?.some(
+      (id) => id.toString() === senderId
+    );
+
+    if (senderBlockedReceiver || receiverBlockedSender) {
+      return res.status(403).json({
+        ok: false,
+        message: "You cannot message this user",
+      });
     }
 
+    // 📎 Handle file upload
     let fileUrl = null;
     let finalMessageType = messageType;
 
     if (req.file) {
-      // CloudinaryStorage provides the URL in req.file.path (secure URL)
-      // It can also be in req.file.url or req.file.secure_url
       fileUrl = req.file.path || req.file.secure_url || req.file.url;
-      
-      // Log for debugging
+
       console.log("📤 File uploaded to Cloudinary:", {
-        path: req.file.path,
-        secure_url: req.file.secure_url,
-        url: req.file.url,
         finalUrl: fileUrl,
-        mimetype: req.file.mimetype
+        mimetype: req.file.mimetype,
       });
-      
-      // Determine message type based on file mime type
-      if (req.file.mimetype.startsWith('image/')) {
-        finalMessageType = 'image';
-      } else if (req.file.mimetype.startsWith('video/')) {
-        finalMessageType = 'video';
-      } else if (req.file.mimetype.startsWith('audio/')) {
-        finalMessageType = 'audio';
-      } else if (req.file.mimetype === 'application/pdf') {
-        finalMessageType = 'pdf';
+
+      if (req.file.mimetype.startsWith("image/")) {
+        finalMessageType = "image";
+      } else if (req.file.mimetype.startsWith("video/")) {
+        finalMessageType = "video";
+      } else if (req.file.mimetype.startsWith("audio/")) {
+        finalMessageType = "audio";
+      } else if (req.file.mimetype === "application/pdf") {
+        finalMessageType = "pdf";
       } else {
-        finalMessageType = 'document';
+        finalMessageType = "document";
       }
     }
 
@@ -67,9 +163,9 @@ router.post("/send", authMiddleware, messageFile("file"), async (req, res) => {
       sender_id: senderId,
       receiver_id: receiverId,
       message: message || "",
-      message_type: finalMessageType
+      message_type: finalMessageType,
     };
-    
+
     if (fileUrl) {
       insertData.file_url = fileUrl;
     }
@@ -80,14 +176,61 @@ router.post("/send", authMiddleware, messageFile("file"), async (req, res) => {
       .select();
 
     if (error) throw error;
-    return res.json({ ok: true, message: "Message sent", data: data[0] });
+
+    // ✅ Emit WebSocket event for real-time delivery
+    const io = req.app.get("io");
+    if (io && data && data[0]) {
+      io.emit("message:new", {
+        ...data[0],
+        senderId: senderId,
+        receiverId: receiverId
+      });
+    }
+
+    return res.json({
+      ok: true,
+      
+      data: data[0],
+    });
   } catch (err) {
     console.error("send message error:", err);
-    // Provide the error message in the response for easier debugging during development.
-    // In production, avoid returning internal error details.
-    return res.status(500).json({ ok: false, message: "Server error", error: err?.message ?? String(err) });
+    return res.status(500).json({
+      ok: false,
+      message: "Server error",
+      error: err?.message ?? String(err),
+    });
   }
 });
+//get all the blocked user
+// GET all blocked users
+router.get("/block/list", authMiddleware, async (req, res) => {
+  try {
+    const userId = req.user._id;
+
+    const user = await User.findById(userId)
+      .populate("blockedUsers", "_id firstName lastName email profilePicture role")
+      .select("blockedUsers");
+
+    if (!user) {
+      return res.status(404).json({
+        ok: false,
+        message: "User not found",
+      });
+    }
+
+    return res.json({
+      ok: true,
+      blockedUsers: user.blockedUsers,
+    });
+  } catch (err) {
+    console.error("get blocked users error:", err);
+    return res.status(500).json({
+      ok: false,
+      message: "Server error",
+    });
+  }
+});
+
 
 // Get last message for each friend
 router.get("/last-messages", authMiddleware, async (req, res) => {
@@ -126,19 +269,22 @@ router.post("/block/:userId", authMiddleware, async (req, res) => {
     const targetUserId = req.params.userId;
 
     if (String(currentUserId) === String(targetUserId)) {
-      return res.status(400).json({ ok: false, message: "Cannot block yourself" });
+      return res
+        .status(400)
+        .json({ ok: false, message: "Cannot block yourself" });
     }
 
     await User.findByIdAndUpdate(currentUserId, {
-      $addToSet: { blockedUsers: targetUserId }
+      $addToSet: { blockedUsers: targetUserId },
     });
 
-    res.json({ ok: true, message: "User blocked successfully" });
+    return res.json({ ok: true, message: "User blocked successfully" });
   } catch (err) {
     console.error("block user error:", err);
     return res.status(500).json({ ok: false, message: "Server error" });
   }
 });
+
 
 // Unblock user
 router.post("/unblock/:userId", authMiddleware, async (req, res) => {

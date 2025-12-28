@@ -14,7 +14,8 @@ import videoRoutes from "./routes/videoRoutes.js";
 import authMiddleware from "./middleware/authMiddleware.js";
 import Call from "./models/call.js";
 import User from "./models/User.js";
-
+import { createServer } from "http";
+import { Server as SocketServer } from "socket.io"; 
 // Agora token builder
 import pkg from "agora-access-token";
 const { RtcTokenBuilder, RtcRole } = pkg;
@@ -44,7 +45,15 @@ const __dirname = dirname(__filename);
 
 const app = express();
 connectDB();
-
+// Initialize Socket.IO
+const httpServer = createServer(app);
+const io = new SocketServer(httpServer, { 
+  cors: {
+    origin: ["http://localhost:3000", "https://www.camsake.com", "https://camsake.com"],
+    methods: ["GET", "POST"],
+    credentials: true
+  }
+});
 // middleware
 app.use(
   cors({
@@ -411,11 +420,98 @@ app.get("/api/chat/:roomId", authMiddleware, async (req, res) => {
     return res.status(500).json({ ok: false, message: "Server error" });
   }
 });
+//Socket connection
 
+
+// Store connected users
+
+
+const connectedUsers = new Map(); // userId -> socketId
+
+io.on("connection", (socket) => {
+  console.log("✅ User connected:", socket.id);
+
+  // User joins with their ID
+  socket.on("user:join", async (userId) => {
+    connectedUsers.set(userId, socket.id);
+    socket.userId = userId;
+    console.log(`👤 User ${userId} joined with socket ${socket.id}`);
+    
+    // Update user status to online in database
+    try {
+      await User.findByIdAndUpdate(userId, {
+        isOnline: true,
+        lastSeen: new Date()
+      });
+      console.log(`✅ User ${userId} marked online in database`);
+    } catch (err) {
+      console.error("Error updating online status:", err);
+    }
+    
+    // Notify ALL users that this user is online
+    io.emit("user:online", userId);
+  });
+
+  // Handle private message - NO NEED, backend already emits
+  socket.on("message:send", async (data) => {
+    console.log("📨 Received message:send from socket (ignored, backend handles this)");
+    // We don't need this anymore since backend emits after saving to DB
+  });
+
+  // Handle typing indicator
+  socket.on("typing:start", (data) => {
+    const { receiverId, senderId } = data;
+    const receiverSocketId = connectedUsers.get(receiverId);
+    if (receiverSocketId) {
+      io.to(receiverSocketId).emit("typing:update", {
+        userId: senderId,
+        isTyping: true
+      });
+    }
+  });
+
+  socket.on("typing:stop", (data) => {
+    const { receiverId, senderId } = data;
+    const receiverSocketId = connectedUsers.get(receiverId);
+    if (receiverSocketId) {
+      io.to(receiverSocketId).emit("typing:update", {
+        userId: senderId,
+        isTyping: false
+      });
+    }
+  });
+
+  // Handle disconnect
+  socket.on("disconnect", async () => {
+    console.log("❌ User disconnected:", socket.id);
+    if (socket.userId) {
+      connectedUsers.delete(socket.userId);
+      
+      // Update user status to offline in database
+      try {
+        await User.findByIdAndUpdate(socket.userId, {
+          isOnline: false,
+          lastSeen: new Date()
+        });
+        console.log(`✅ User ${socket.userId} marked offline in database`);
+      } catch (err) {
+        console.error("Error updating offline status:", err);
+      }
+      
+      // Notify ALL users that this user is offline
+      io.emit("user:offline", socket.userId);
+      console.log(`👋 User ${socket.userId} went offline`);
+    }
+  });
+});
+
+app.set("io", io);
 // ----------------------------
 // Start server
 // ----------------------------
 const PORT = process.env.PORT || 5000;
-app.listen(PORT, () => {
-  console.log(`🚀 Server running on port ${PORT}`);
+
+httpServer.listen(PORT, () => {
+  console.log(`🚀 Server with Socket.IO running on port ${PORT}`);
+  console.log(`📡 WebSocket server ready at ws://localhost:${PORT}`);
 });

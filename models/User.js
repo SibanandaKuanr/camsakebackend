@@ -13,7 +13,9 @@ const FriendSchema = new mongoose.Schema(
       enum: ["pending", "accepted"],
       default: "pending",
     },
+    requestedBy: { type: mongoose.Schema.Types.ObjectId, ref: "User" },
   },
+  
   { _id: false }
 );
 

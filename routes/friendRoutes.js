@@ -8,13 +8,16 @@ import {
     rejectFriendRequest,
   unfriendUser,
   getFriendlists,
+  
+  getAcceptedFriends
 } from "../controllers/friendcontroller.js";
 
 const router = express.Router();
 
 router.post("/request/:id", authMiddleware, sendFriendRequest);
 router.post("/accept/:id", authMiddleware, acceptFriendRequest);
-router.get("/friends", authMiddleware, getFriendlists);
+router.get("/friendrequest",authMiddleware,getFriends);
+router.get("/friends", authMiddleware, getAcceptedFriends);
 router.get("/opposite-users", authMiddleware, getOppositeUsers);
 router.post("/reject/:id", authMiddleware, rejectFriendRequest);
 router.delete("/unfriend/:id", authMiddleware, unfriendUser);
